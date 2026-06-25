@@ -22,6 +22,13 @@ type BotRuntimeStatusView struct {
 	StartedAt   string `json:"startedAt"`
 }
 
+const botSessionUpdatedChannel = "bot:session-updated"
+
+type botSessionUpdatedPayload struct {
+	TabID       string `json:"tabId"`
+	SessionPath string `json:"sessionPath"`
+}
+
 type desktopBotRuntime struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -49,7 +56,7 @@ func (a *App) refreshBotRuntime() {
 		a.botRuntime.stop("error", err.Error())
 		return
 	}
-	_ = a.botRuntime.apply(a.bootContext(), cfg, globalTabWorkspaceRoot(), a.persistRemoteBotToolApprovalMode)
+	_ = a.botRuntime.apply(a.bootContext(), cfg, globalTabWorkspaceRoot(), a.persistRemoteBotToolApprovalMode, a.notifyBotSessionUpdated)
 }
 
 func (a *App) loadDesktopBotConfig() (*config.Config, error) {
@@ -73,7 +80,7 @@ func (a *App) BotRuntimeStatus() BotRuntimeStatusView {
 	return a.botRuntime.snapshot()
 }
 
-func (r *desktopBotRuntime) apply(parent context.Context, cfg *config.Config, workspaceRoot string, onToolApprovalModeChange func(bot.InboundMessage, string) error) error {
+func (r *desktopBotRuntime) apply(parent context.Context, cfg *config.Config, workspaceRoot string, onToolApprovalModeChange func(bot.InboundMessage, string) error, onSessionUpdated func(bot.InboundMessage, string) error) error {
 	if r == nil {
 		return nil
 	}
@@ -117,7 +124,9 @@ func (r *desktopBotRuntime) apply(parent context.Context, cfg *config.Config, wo
 		Debounce:                 time.Duration(cfg.Bot.DebounceMs) * time.Millisecond,
 		OnInbound:                botruntime.NewRemoteRememberer(logger),
 		OnSessionReady:           botruntime.NewSessionRemembererWithWorkspace(logger, workspaceRoot),
+		OnSessionUpdated:         onSessionUpdated,
 		OnToolApprovalModeChange: onToolApprovalModeChange,
+		BoundSessionPaths:        collectBoundSessionPaths(cfg),
 	}
 	bindings := botruntime.AdapterBindings(cfg, plan.Enabled, nil, logger)
 	if len(bindings) == 0 {
@@ -174,6 +183,38 @@ func (a *App) persistRemoteBotToolApprovalMode(msg bot.InboundMessage, mode stri
 	})
 }
 
+func (a *App) notifyBotSessionUpdated(_ bot.InboundMessage, sessionID string) error {
+	sessionPath := botSessionPathFromTarget(sessionID)
+	if sessionPath == "" {
+		return nil
+	}
+	key := sessionRuntimeKey(sessionPath)
+	a.mu.RLock()
+	payloads := make([]botSessionUpdatedPayload, 0)
+	for _, tab := range a.tabs {
+		if tab == nil {
+			continue
+		}
+		if sessionRuntimeKey(tab.currentSessionPath()) != key {
+			continue
+		}
+		payloads = append(payloads, botSessionUpdatedPayload{TabID: tab.ID, SessionPath: sessionPath})
+	}
+	a.mu.RUnlock()
+	for _, payload := range payloads {
+		a.emitRuntimeEvent(botSessionUpdatedChannel, payload)
+	}
+	return nil
+}
+
+func botSessionPathFromTarget(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if strings.HasPrefix(sessionID, "path:") {
+		return strings.TrimSpace(strings.TrimPrefix(sessionID, "path:"))
+	}
+	return ""
+}
+
 func summarizeBotRuntimeErrors(errs []error) string {
 	parts := make([]string, 0, len(errs))
 	for _, err := range errs {
@@ -219,11 +260,65 @@ func desktopBotRuntimePlan(cfg *config.Config) botRuntimePlan {
 	return botRuntimePlan{Start: true, Status: "running", Message: "bot runtime can start", Enabled: enabled}
 }
 
+func collectBoundSessionPaths(cfg *config.Config) map[bot.Platform]string {
+	paths := make(map[bot.Platform]string)
+	if cfg == nil {
+		return paths
+	}
+	if path := latestConfiguredBoundSessionPath(cfg.Bot.QQ.SessionMappings); path != "" {
+		paths[bot.PlatformQQ] = path
+	}
+	for _, conn := range cfg.Bot.Connections {
+		if !conn.Enabled {
+			continue
+		}
+		plat := bot.Platform(strings.TrimSpace(conn.Provider))
+		if path := latestConfiguredBoundSessionPath(conn.SessionMappings); path != "" {
+			paths[plat] = path
+		}
+	}
+	return paths
+}
+
+func latestConfiguredBoundSessionPath(mappings []config.BotConnectionSessionMapping) string {
+	if path := latestConfiguredBoundSessionPathBySource(mappings, "manual"); path != "" {
+		return path
+	}
+	return latestConfiguredBoundSessionPathBySource(mappings, "")
+}
+
+func latestConfiguredBoundSessionPathBySource(mappings []config.BotConnectionSessionMapping, source string) string {
+	source = strings.TrimSpace(source)
+	for i := len(mappings) - 1; i >= 0; i-- {
+		if source != "" && strings.TrimSpace(mappings[i].SessionSource) != source {
+			continue
+		}
+		sessionID := strings.TrimSpace(mappings[i].SessionID)
+		if strings.HasPrefix(strings.ToLower(sessionID), "path:") {
+			if path := strings.TrimSpace(sessionID[5:]); path != "" {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
 func (r *desktopBotRuntime) stop(status, message string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stopLocked()
 	r.status = BotRuntimeStatusView{Status: status, Message: message}
+}
+
+func (r *desktopBotRuntime) updateBoundSession(connID, path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gw != nil {
+		plat := bot.PlatformQQ
+		if connID == "qq" || connID == "__qq_bot__" {
+			r.gw.SetBoundSessionPath(plat, path)
+		}
+	}
 }
 
 func (r *desktopBotRuntime) stopLocked() {

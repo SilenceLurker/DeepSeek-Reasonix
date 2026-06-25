@@ -411,3 +411,17 @@ func TestSummarizeBotRuntimeErrorsCapsOutput(t *testing.T) {
 		t.Fatalf("summary = %q, should cap extra errors", got)
 	}
 }
+
+func TestCollectBoundSessionPathsPrefersManualMapping(t *testing.T) {
+	cfg := config.Default()
+	cfg.Bot.QQ.SessionMappings = []config.BotConnectionSessionMapping{
+		{SessionID: "path:/sessions/old-auto.jsonl", SessionSource: "auto"},
+		{SessionID: " path:/sessions/manual.jsonl ", SessionSource: "manual"},
+		{SessionID: "path:/sessions/new-auto.jsonl", SessionSource: "auto"},
+	}
+
+	got := collectBoundSessionPaths(cfg)
+	if got[bot.PlatformQQ] != "/sessions/manual.jsonl" {
+		t.Fatalf("qq bound session = %q, want manual", got[bot.PlatformQQ])
+	}
+}
