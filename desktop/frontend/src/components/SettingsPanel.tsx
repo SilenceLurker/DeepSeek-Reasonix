@@ -653,7 +653,7 @@ function defaultBotSettings(): BotSettingsView {
       feishuGroups: [],
       weixinGroups: [],
     },
-    qq: { enabled: false, appId: "", appSecretEnv: "QQ_BOT_APP_SECRET", secretSet: false, sandbox: false },
+    qq: { enabled: false, appId: "", appSecretEnv: "QQ_BOT_APP_SECRET", secretSet: false, sandbox: false, sessionMappings: [] },
     feishu: {
       enabled: false,
       domain: "feishu",
@@ -1999,7 +1999,7 @@ function BotsSection({ s, busy, apply, initialFocus }: BotsSectionProps) {
     const env = draft.qq.appSecretEnv.trim() || DEFAULT_QQ_SECRET_ENV;
     const nextDraft = botDraftWithDerivedGatewayState({
       ...draft,
-      qq: { enabled: false, appId: "", appSecretEnv: DEFAULT_QQ_SECRET_ENV, secretSet: false, sandbox: false },
+      qq: { enabled: false, appId: "", appSecretEnv: DEFAULT_QQ_SECRET_ENV, secretSet: false, sandbox: false, sessionMappings: [] },
     });
     await apply(async () => {
       await app.SetBotSettings(nextDraft);

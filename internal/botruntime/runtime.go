@@ -276,6 +276,16 @@ func AllowlistUserCount(a config.BotAllowlist) int {
 	return len(a.QQUsers) + len(a.FeishuUsers) + len(a.WeixinUsers)
 }
 
+func ConnectionCount(connections []config.BotConnectionConfig) int {
+	count := 0
+	for _, conn := range connections {
+		if conn.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
 func NewRemoteRememberer(logger *slog.Logger) func(bot.InboundMessage) {
 	var mu sync.Mutex
 	seen := make(map[string]bool)
@@ -385,6 +395,11 @@ func rememberInbound(msg bot.InboundMessage, sessionID string, actualWorkspaceRo
 			workspaceRoot = actualWorkspaceRoot
 		}
 		chatType, userID, threadID := botSessionMappingIdentity(msg)
+		// 只有 sessionID 非空时才创建映射：OnInbound 回调（无 sessionID）
+		// 只负责记录 remoteId，实际的会话绑定由 OnSessionReady 完成。
+		if sessionID == "" {
+			continue
+		}
 		conn.SessionMappings = append(conn.SessionMappings, config.BotConnectionSessionMapping{
 			RemoteID:      remoteID,
 			SessionID:     sessionID,

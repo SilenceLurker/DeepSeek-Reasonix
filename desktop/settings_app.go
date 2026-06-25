@@ -100,11 +100,12 @@ type BotAllowlistView struct {
 }
 
 type QQBotView struct {
-	Enabled      bool   `json:"enabled"`
-	AppID        string `json:"appId"`
-	AppSecretEnv string `json:"appSecretEnv"`
-	SecretSet    bool   `json:"secretSet"`
-	Sandbox      bool   `json:"sandbox"`
+	Enabled         bool                            `json:"enabled"`
+	AppID           string                          `json:"appId"`
+	AppSecretEnv    string                          `json:"appSecretEnv"`
+	SecretSet       bool                            `json:"secretSet"`
+	Sandbox         bool                            `json:"sandbox"`
+	SessionMappings []BotConnectionSessionMappingView `json:"sessionMappings"`
 }
 
 type FeishuBotView struct {
@@ -522,11 +523,12 @@ func botSettingsView(b config.BotConfig) BotSettingsView {
 			WeixinGroups: nonNil(b.Allowlist.WeixinGroups),
 		},
 		QQ: QQBotView{
-			Enabled:      b.QQ.Enabled,
-			AppID:        b.QQ.AppID,
-			AppSecretEnv: b.QQ.AppSecretEnv,
-			SecretSet:    strings.TrimSpace(b.QQ.AppSecretEnv) != "" && os.Getenv(b.QQ.AppSecretEnv) != "",
-			Sandbox:      b.QQ.Sandbox,
+			Enabled:         b.QQ.Enabled,
+			AppID:           b.QQ.AppID,
+			AppSecretEnv:    b.QQ.AppSecretEnv,
+			SecretSet:       strings.TrimSpace(b.QQ.AppSecretEnv) != "" && os.Getenv(b.QQ.AppSecretEnv) != "",
+			Sandbox:         b.QQ.Sandbox,
+			SessionMappings: botSessionMappingViews(b.QQ.SessionMappings, ""),
 		},
 		Feishu: FeishuBotView{
 			Enabled:           b.Feishu.Enabled,
@@ -1657,10 +1659,11 @@ func (a *App) SetBotSettings(b BotSettingsView) error {
 			WeixinGroups: trimList(b.Allowlist.WeixinGroups),
 		}
 		c.Bot.QQ = config.QQBotConfig{
-			Enabled:      b.QQ.Enabled,
-			AppID:        strings.TrimSpace(b.QQ.AppID),
-			AppSecretEnv: strings.TrimSpace(b.QQ.AppSecretEnv),
-			Sandbox:      b.QQ.Sandbox,
+			Enabled:         b.QQ.Enabled,
+			AppID:           strings.TrimSpace(b.QQ.AppID),
+			AppSecretEnv:    strings.TrimSpace(b.QQ.AppSecretEnv),
+			Sandbox:         b.QQ.Sandbox,
+			SessionMappings: botSessionMappingConfigs(b.QQ.SessionMappings, ""),
 		}
 		c.Bot.Feishu = config.FeishuBotConfig{
 			Enabled:           b.Feishu.Enabled,

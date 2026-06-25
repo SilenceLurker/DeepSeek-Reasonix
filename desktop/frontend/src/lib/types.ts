@@ -744,6 +744,7 @@ export interface QQBotView {
   appSecretEnv: string;
   secretSet: boolean;
   sandbox: boolean;
+  sessionMappings: BotConnectionSessionMappingView[];
 }
 
 export interface FeishuBotView {
