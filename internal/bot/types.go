@@ -142,3 +142,9 @@ type Adapter interface {
 
 // MessageHandler 是 BotGateway 处理入站消息的回调。
 type MessageHandler func(ctx context.Context, msg InboundMessage)
+
+// SelfIdentifier 是 Adapter 可选实现的接口，返回 Bot 在平台上的自身用户 ID。
+// 当消息的发送者 ID 等于 Bot 自身 ID 时，白名单检查自动放行。
+type SelfIdentifier interface {
+	BotSelfID() string
+}

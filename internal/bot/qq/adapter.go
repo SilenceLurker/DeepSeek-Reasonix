@@ -39,6 +39,10 @@ type adapter struct {
 	tokenExpiry time.Time
 	tokenMu     sync.Mutex
 
+	// botUserID 是 Bot 自己的 QQ 用户 ID，从 READY 事件的 user.id 提取，
+	// 用于过滤自己发出的消息回显。
+	botUserID string
+
 	sendMu             sync.Mutex
 	nextOutboundMsgSeq int
 	markdownDisabled   bool
@@ -46,6 +50,9 @@ type adapter struct {
 
 func (a *adapter) Platform() bot.Platform { return bot.PlatformQQ }
 func (a *adapter) Name() string           { return "qq" }
+
+// BotSelfID 返回 Bot 在 QQ 平台上的用户 ID，从 WS READY 事件提取。
+func (a *adapter) BotSelfID() string { return a.botUserID }
 
 func (a *adapter) Start(ctx context.Context) error {
 	a.msgCh = make(chan bot.InboundMessage, 64)

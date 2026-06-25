@@ -286,6 +286,11 @@ func (a *adapter) connectGateway(ctx context.Context, token string) error {
 	if msg.Op == opDispatch && msg.T == "READY" {
 		var ready struct {
 			SessionID string `json:"session_id"`
+			User      struct {
+				ID       string `json:"id"`
+				Username string `json:"username"`
+				Bot      bool   `json:"bot"`
+			} `json:"user"`
 		}
 		if err := json.Unmarshal(msg.D, &ready); err != nil {
 			return fmt.Errorf("decode ready: %w", err)
@@ -293,7 +298,10 @@ func (a *adapter) connectGateway(ctx context.Context, token string) error {
 		ws.sessionID = ready.SessionID
 		a.sessionID = ready.SessionID
 		a.seq = msg.S
-		a.logger.Info("qq gateway ready", "sandbox", a.cfg.Sandbox, "heartbeat_ms", ws.heartbeatMs)
+		if ready.User.ID != "" {
+			a.botUserID = ready.User.ID
+		}
+		a.logger.Info("qq gateway ready", "sandbox", a.cfg.Sandbox, "heartbeat_ms", ws.heartbeatMs, "bot_user", ready.User.ID)
 	} else {
 		a.logger.Warn("qq gateway expected ready event", "op", msg.Op, "event", msg.T)
 	}
@@ -464,9 +472,17 @@ func (a *adapter) handleDispatch(msg gatewayPayload) {
 		return
 	}
 
+	author := qqAuthorID(evt)
+	// 过滤 Bot 自己的消息回显：QQ 网关会在 Bot 发送消息后回推 MESSAGE_CREATE
+	// 等事件，此时 author 是 Bot 自己的 ID，不应作为入站消息处理。
+	if a.botUserID != "" && author == a.botUserID {
+		a.logger.Info("qq dispatch ignored", "reason", "self_message", "event", msg.T)
+		return
+	}
+
 	ib := bot.InboundMessage{
 		Platform:  bot.PlatformQQ,
-		UserID:    qqAuthorID(evt),
+		UserID:    author,
 		UserName:  evt.Author.Username,
 		Text:      evt.Content,
 		MessageID: evt.ID,
