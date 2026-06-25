@@ -299,8 +299,12 @@ func (gw *BotGateway) handleMessage(ctx context.Context, binding AdapterBinding,
 
 	// allowlist 检查
 	if !gw.checkAllowlist(binding.Platform, msg) {
-		gw.logger.Info("user not in allowlist", "platform", binding.Platform, "connection", msg.ConnectionID, "user", hashID(msg.UserID))
-		_ = gw.sendText(ctx, binding.Adapter, msg, "抱歉，您没有使用此 bot 的权限。")
+		actor := msg.UserID
+		if msg.OperatorID != "" {
+			actor = msg.OperatorID
+		}
+		gw.logger.Info("user not in allowlist", "platform", binding.Platform, "connection", msg.ConnectionID, "user", hashID(actor))
+		_ = gw.sendText(ctx, binding.Adapter, msg, fmt.Sprintf("抱歉，您没有使用此 bot 的权限。\n您的 ID: %s", actor))
 		return
 	}
 	if gw.cfg.OnInbound != nil {
