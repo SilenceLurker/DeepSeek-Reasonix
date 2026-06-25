@@ -38,10 +38,16 @@ type GatewayConfig struct {
 	// controller for an inbound remote. Hosts may persist the concrete session ID
 	// or keep the remote as a read-only channel.
 	OnSessionReady func(InboundMessage, string) error
+	// OnSessionUpdated notifies the host after a remote turn has written to the
+	// backing session, so open read-only channel views can reload from disk.
+	OnSessionUpdated func(InboundMessage, string) error
 	// OnToolApprovalModeChange persists a remote IM request such as /yolo on.
 	// The gateway updates the live session and in-memory defaults first; this
 	// callback lets desktop save the chosen connection mode to user config.
 	OnToolApprovalModeChange func(InboundMessage, string) error
+	// BoundSessionPaths maps platform to a manually bound session path.
+	// Messages from that platform resume this session instead of auto-creating.
+	BoundSessionPaths map[Platform]string
 }
 
 // ChannelConfig overrides gateway defaults for one IM channel.
@@ -239,6 +245,16 @@ func (gw *BotGateway) StartErrors() []error {
 	return out
 }
 
+// SetBoundSessionPath 运行时更新指定平台的绑定会话路径，立即生效。
+func (gw *BotGateway) SetBoundSessionPath(plat Platform, path string) {
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
+	if gw.cfg.BoundSessionPaths == nil {
+		gw.cfg.BoundSessionPaths = make(map[Platform]string)
+	}
+	gw.cfg.BoundSessionPaths[plat] = path
+}
+
 // Stop 停止所有适配器并关闭所有 session。
 func (gw *BotGateway) Stop() {
 	gw.mu.Lock()
@@ -298,7 +314,7 @@ func (gw *BotGateway) handleMessage(ctx context.Context, binding AdapterBinding,
 	gw.logger.Info("bot inbound message", logFields...)
 
 	// allowlist 检查
-	if !gw.checkAllowlist(binding.Platform, msg) {
+	if !gw.checkAllowlist(binding.Platform, binding.Adapter, msg) {
 		actor := msg.UserID
 		if msg.OperatorID != "" {
 			actor = msg.OperatorID
@@ -357,7 +373,7 @@ func (gw *BotGateway) addPendingReaction(ctx context.Context, plat Platform, ada
 	}
 }
 
-func (gw *BotGateway) checkAllowlist(plat Platform, msg InboundMessage) bool {
+func (gw *BotGateway) checkAllowlist(plat Platform, adapter Adapter, msg InboundMessage) bool {
 	if gw.cfg.Allowlist.AllowAll {
 		return true
 	}
@@ -367,6 +383,12 @@ func (gw *BotGateway) checkAllowlist(plat Platform, msg InboundMessage) bool {
 	actor := msg.UserID
 	if msg.OperatorID != "" {
 		actor = msg.OperatorID
+	}
+	// Bot 自己的消息回显自动放行
+	if si, ok := adapter.(SelfIdentifier); ok {
+		if sid := si.BotSelfID(); sid != "" && actor == sid {
+			return true
+		}
 	}
 	if !gw.allowlist[plat][actor] {
 		return false
@@ -842,6 +864,7 @@ func (gw *BotGateway) runTurn(ctx context.Context, adapter Adapter, key string, 
 	sink.ctrl = state.ctrl
 	err := state.ctrl.RunTurn(turnCtx, input)
 	sink.Emit(event.Event{Kind: event.TurnDone, Err: err})
+	gw.rememberSessionUpdated(msg, state.ctrl)
 	if err != nil {
 		gw.logger.Warn("turn error", "session", key[:8], "err", err)
 		return
@@ -850,19 +873,24 @@ func (gw *BotGateway) runTurn(ctx context.Context, adapter Adapter, key string, 
 }
 
 func (gw *BotGateway) getOrCreateSession(ctx context.Context, key string, msg InboundMessage) *sessionState {
+	// 每次从 config 文件读取最新绑定，确保切换立即生效
+	boundPath := gw.boundSessionPath(msg)
 	gw.mu.Lock()
-	if state, ok := gw.controllers[key]; ok {
+	state, ok := gw.controllers[key]
+	if ok {
 		state.lastActive = time.Now()
-		gw.mu.Unlock()
+	}
+	gw.mu.Unlock()
+	if ok {
+		gw.applyBoundSessionPath(state.ctrl, boundPath)
 		gw.logger.Info("bot session reused", "platform", msg.Platform, "chat_type", msg.ChatType, "chat", hashID(msg.ChatID), "session", key[:8])
 		return state
 	}
-	gw.mu.Unlock()
 
-	// 创建新 Controller
+	// 创建新 Controller — 优先读取 config 中的绑定 session
 	sessionSink := &sessionEventSink{}
 	model, workspaceRoot, toolApprovalMode := gw.sessionOptionsForMessage(msg)
-	gw.logger.Info("bot session creating", "platform", msg.Platform, "chat_type", msg.ChatType, "chat", hashID(msg.ChatID), "session", key[:8], "model", model, "workspace_set", strings.TrimSpace(workspaceRoot) != "", "tool_approval_mode", normalizeBotToolApprovalMode(toolApprovalMode))
+	gw.logger.Info("bot session creating", "platform", msg.Platform, "chat_type", msg.ChatType, "chat", hashID(msg.ChatID), "session", key[:8], "model", model, "workspace_set", strings.TrimSpace(workspaceRoot) != "", "tool_approval_mode", normalizeBotToolApprovalMode(toolApprovalMode), "bound_session", boundPath)
 	ctrl, err := boot.Build(ctx, boot.Options{
 		Model:           model,
 		MaxSteps:        gw.cfg.MaxSteps,
@@ -878,6 +906,8 @@ func (gw *BotGateway) getOrCreateSession(ctx context.Context, key string, msg In
 	}
 	ctrl.EnableInteractiveApproval()
 	ctrl.SetToolApprovalMode(toolApprovalMode)
+	// 优先绑定手动指定的 session
+	gw.applyBoundSessionPath(ctrl, boundPath)
 	ensureControllerSessionPath(ctrl)
 
 	gw.mu.Lock()
@@ -888,11 +918,108 @@ func (gw *BotGateway) getOrCreateSession(ctx context.Context, key string, msg In
 		createdAt:   time.Now(),
 		lastActive:  time.Now(),
 	}
-	state := gw.controllers[key]
+	state = gw.controllers[key]
 	gw.mu.Unlock()
 
 	gw.logger.Info("bot session created", "platform", msg.Platform, "chat_type", msg.ChatType, "chat", hashID(msg.ChatID), "session", key[:8])
 	return state
+}
+
+func (gw *BotGateway) applyBoundSessionPath(ctrl botController, boundPath string) {
+	boundPath = strings.TrimSpace(boundPath)
+	if ctrl == nil || boundPath == "" || ctrl.SessionPath() == boundPath {
+		return
+	}
+	loaded, err := agent.LoadSession(boundPath)
+	if err != nil {
+		gw.logger.Warn("bot bound session load failed; using path for future snapshots", "path", boundPath, "err", err)
+		ctrl.SetSessionPath(boundPath)
+		return
+	}
+	ctrl.Resume(loaded, boundPath)
+}
+
+// readBoundSessionFromConfig reads the latest bound session path for a platform
+// or saved connection from config.
+func (gw *BotGateway) readBoundSessionFromConfig(msg InboundMessage) string {
+	userPath := config.UserConfigPath()
+	if userPath == "" {
+		return ""
+	}
+	cfg := config.LoadForEdit(userPath)
+	// QQ legacy
+	if msg.Platform == PlatformQQ {
+		if path := latestBoundSessionPath(cfg.Bot.QQ.SessionMappings); path != "" {
+			return path
+		}
+	}
+	// Connections
+	for _, conn := range cfg.Bot.Connections {
+		if !conn.Enabled {
+			continue
+		}
+		if !botConnectionMatchesMessage(conn, msg) {
+			continue
+		}
+		if path := latestBoundSessionPath(conn.SessionMappings); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+func latestBoundSessionPath(mappings []config.BotConnectionSessionMapping) string {
+	if path := latestBoundSessionPathBySource(mappings, "manual"); path != "" {
+		return path
+	}
+	return latestBoundSessionPathBySource(mappings, "")
+}
+
+func latestBoundSessionPathBySource(mappings []config.BotConnectionSessionMapping, source string) string {
+	source = strings.TrimSpace(source)
+	for i := len(mappings) - 1; i >= 0; i-- {
+		if source != "" && strings.TrimSpace(mappings[i].SessionSource) != source {
+			continue
+		}
+		sessionID := strings.TrimSpace(mappings[i].SessionID)
+		if strings.HasPrefix(strings.ToLower(sessionID), "path:") {
+			if path := strings.TrimSpace(sessionID[5:]); path != "" {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+func botConnectionMatchesMessage(conn config.BotConnectionConfig, msg InboundMessage) bool {
+	if Platform(strings.TrimSpace(conn.Provider)) != msg.Platform {
+		return false
+	}
+	if msg.ConnectionID != "" {
+		id := strings.TrimSpace(conn.ID)
+		derivedID := strings.Trim(strings.ToLower(strings.TrimSpace(conn.Provider)+"-"+strings.TrimSpace(conn.Domain)), "-")
+		if msg.ConnectionID != id && msg.ConnectionID != derivedID {
+			return false
+		}
+	}
+	if msg.Domain != "" && conn.Domain != "" && !strings.EqualFold(msg.Domain, conn.Domain) {
+		return false
+	}
+	return true
+}
+
+func (gw *BotGateway) boundSessionPath(msg InboundMessage) string {
+	// Prefer the in-memory binding updated by the desktop runtime.
+	gw.mu.Lock()
+	if gw.cfg.BoundSessionPaths != nil {
+		if p := gw.cfg.BoundSessionPaths[msg.Platform]; p != "" {
+			gw.mu.Unlock()
+			return p
+		}
+	}
+	gw.mu.Unlock()
+	// 兜底：实时读 config，确保刚绑定的 session path 能立即生效
+	return gw.readBoundSessionFromConfig(msg)
 }
 
 func ensureControllerSessionPath(ctrl botController) {
@@ -935,12 +1062,36 @@ func (gw *BotGateway) rememberSessionReady(msg InboundMessage, ctrl botControlle
 	if gw.cfg.OnSessionReady == nil || ctrl == nil {
 		return
 	}
+	ensureControllerSessionPath(ctrl)
 	sessionID := botSessionTarget(ctrl.SessionPath())
+	// 如果 controller 还没分配 session 文件（SessionDir 为空时可能不分配），
+	// 兜底从 config 全局 session 目录生成一个固定路径，确保映射一定写进去。
+	if sessionID == "" {
+		dir := botSessionDir("")
+		if dir != "" {
+			p := agent.NewSessionPath(dir, ctrl.Label())
+			ctrl.SetSessionPath(p)
+			sessionID = botSessionTarget(p)
+		}
+	}
 	if sessionID == "" {
 		return
 	}
 	if err := gw.cfg.OnSessionReady(msg, sessionID); err != nil {
 		gw.logger.Warn("remember bot session failed", "platform", msg.Platform, "connection", msg.ConnectionID, "err", err)
+	}
+}
+
+func (gw *BotGateway) rememberSessionUpdated(msg InboundMessage, ctrl botController) {
+	if gw.cfg.OnSessionUpdated == nil || ctrl == nil {
+		return
+	}
+	sessionID := botSessionTarget(ctrl.SessionPath())
+	if sessionID == "" {
+		return
+	}
+	if err := gw.cfg.OnSessionUpdated(msg, sessionID); err != nil {
+		gw.logger.Warn("notify bot session update failed", "platform", msg.Platform, "connection", msg.ConnectionID, "err", err)
 	}
 }
 

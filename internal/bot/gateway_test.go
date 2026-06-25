@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"reasonix/internal/agent"
+	"reasonix/internal/config"
 	"reasonix/internal/control"
 	"reasonix/internal/event"
 	"reasonix/internal/provider"
@@ -227,14 +228,14 @@ func TestGatewayAllowlistCheck(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := NewGateway(cfg, nil, logger)
 
-	if !gw.checkAllowlist(PlatformQQ, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "allowed_user_1"}) {
+	if !gw.checkAllowlist(PlatformQQ, nil, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "allowed_user_1"}) {
 		t.Error("allowed user should pass")
 	}
-	if gw.checkAllowlist(PlatformQQ, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "unknown_user"}) {
+	if gw.checkAllowlist(PlatformQQ, nil, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "unknown_user"}) {
 		t.Error("unknown user should not pass")
 	}
 	// 不同平台
-	if gw.checkAllowlist(PlatformFeishu, InboundMessage{Platform: PlatformFeishu, ChatType: ChatDM, UserID: "allowed_user_1"}) {
+	if gw.checkAllowlist(PlatformFeishu, nil, InboundMessage{Platform: PlatformFeishu, ChatType: ChatDM, UserID: "allowed_user_1"}) {
 		t.Error("QQ allowlist should not apply to feishu")
 	}
 }
@@ -255,10 +256,10 @@ func TestGatewayAllowlistDoesNotApplyGroupsToDirectMessages(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := NewGateway(cfg, nil, logger)
 
-	if !gw.checkAllowlist(PlatformQQ, InboundMessage{Platform: PlatformQQ, ChatType: ChatDirect, ChatID: "guild-dm", UserID: "allowed_user"}) {
+	if !gw.checkAllowlist(PlatformQQ, nil, InboundMessage{Platform: PlatformQQ, ChatType: ChatDirect, ChatID: "guild-dm", UserID: "allowed_user"}) {
 		t.Error("direct message should not be rejected by group allowlist")
 	}
-	if gw.checkAllowlist(PlatformQQ, InboundMessage{Platform: PlatformQQ, ChatType: ChatGroup, ChatID: "unknown_group", UserID: "allowed_user"}) {
+	if gw.checkAllowlist(PlatformQQ, nil, InboundMessage{Platform: PlatformQQ, ChatType: ChatGroup, ChatID: "unknown_group", UserID: "allowed_user"}) {
 		t.Error("unknown group should still be rejected by group allowlist")
 	}
 }
@@ -276,12 +277,12 @@ func TestGatewayAllowlistGatesOnOperatorNotCardRequester(t *testing.T) {
 	gw := NewGateway(cfg, nil, logger)
 
 	stranger := InboundMessage{Platform: PlatformFeishu, ChatType: ChatGroup, ChatID: "chat", UserID: "requester", OperatorID: "stranger"}
-	if gw.checkAllowlist(PlatformFeishu, stranger) {
+	if gw.checkAllowlist(PlatformFeishu, nil, stranger) {
 		t.Error("a non-allowlisted operator must be rejected even when the card carries an allowlisted requester id")
 	}
 
 	allowed := InboundMessage{Platform: PlatformFeishu, ChatType: ChatGroup, ChatID: "chat", UserID: "requester", OperatorID: "requester"}
-	if !gw.checkAllowlist(PlatformFeishu, allowed) {
+	if !gw.checkAllowlist(PlatformFeishu, nil, allowed) {
 		t.Error("an allowlisted operator should pass")
 	}
 }
@@ -293,7 +294,7 @@ func TestGatewayAllowlistDisabledRejectsByDefault(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := NewGateway(cfg, nil, logger)
 
-	if gw.checkAllowlist(PlatformQQ, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "any_user"}) {
+	if gw.checkAllowlist(PlatformQQ, nil, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "any_user"}) {
 		t.Error("disabled allowlist should reject unless allow_all is explicit")
 	}
 }
@@ -305,10 +306,56 @@ func TestGatewayAllowAll(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	gw := NewGateway(cfg, nil, logger)
 
-	if !gw.checkAllowlist(PlatformQQ, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "any_user"}) {
+	if !gw.checkAllowlist(PlatformQQ, nil, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "any_user"}) {
 		t.Error("allow_all should allow everyone")
 	}
 }
+
+func TestGatewayAllowlistAllowsBotSelfID(t *testing.T) {
+	cfg := GatewayConfig{
+		Allowlist: AllowlistConfig{
+			Enabled: true,
+			Users:   map[Platform][]string{},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gw := NewGateway(cfg, nil, logger)
+
+	// 一个模拟 adapter，实现 SelfIdentifier 返回自己的 Bot ID
+	selfAdapter := &selfIDAdapter{botID: "bot-qq-001"}
+
+	// Bot 自己的消息应该被放行
+	if !gw.checkAllowlist(PlatformQQ, selfAdapter, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "bot-qq-001"}) {
+		t.Error("bot's own messages should pass allowlist via SelfIdentifier")
+	}
+
+	// 非 Bot 的消息仍然被拒绝
+	if gw.checkAllowlist(PlatformQQ, selfAdapter, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: "stranger"}) {
+		t.Error("stranger messages should be rejected")
+	}
+
+	// botUserID 为空时不应放行
+	emptySelf := &selfIDAdapter{botID: ""}
+	if gw.checkAllowlist(PlatformQQ, emptySelf, InboundMessage{Platform: PlatformQQ, ChatType: ChatDM, UserID: ""}) {
+		t.Error("empty botID should not auto-allow empty actor")
+	}
+}
+
+// selfIDAdapter 是实现 SelfIdentifier 的测试桩。
+type selfIDAdapter struct {
+	botID string
+}
+
+func (a *selfIDAdapter) Platform() Platform              { return PlatformQQ }
+func (a *selfIDAdapter) Start(ctx context.Context) error { return nil }
+func (a *selfIDAdapter) Stop() error                     { return nil }
+func (a *selfIDAdapter) Send(ctx context.Context, msg OutboundMessage) (SendResult, error) {
+	return SendResult{}, nil
+}
+func (a *selfIDAdapter) SendTyping(ctx context.Context, chatID string) error { return nil }
+func (a *selfIDAdapter) Messages() <-chan InboundMessage                     { return nil }
+func (a *selfIDAdapter) Name() string                                        { return "test-self-id" }
+func (a *selfIDAdapter) BotSelfID() string                                   { return a.botID }
 
 func TestGatewayNormalizesNumericApprovalShortcutsOnlyWhenPending(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -667,6 +714,17 @@ func TestGatewaySessionOptionsPreferConnectionOverride(t *testing.T) {
 	}
 	if mode != "ask" {
 		t.Fatalf("lark tool approval mode = %q, want ask", mode)
+	}
+}
+
+func TestLatestBoundSessionPathPrefersNewestMapping(t *testing.T) {
+	got := latestBoundSessionPath([]config.BotConnectionSessionMapping{
+		{SessionID: "path:/old/auto.jsonl", SessionSource: "auto"},
+		{SessionID: "topic:abc", SessionSource: "auto"},
+		{SessionID: "path:/new/manual.jsonl", SessionSource: "manual"},
+	})
+	if got != "/new/manual.jsonl" {
+		t.Fatalf("latest bound path = %q, want newest path mapping", got)
 	}
 }
 
