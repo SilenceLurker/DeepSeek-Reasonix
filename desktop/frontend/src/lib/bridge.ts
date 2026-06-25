@@ -16,6 +16,7 @@ import { modeWithAutoApproveTools, modeWithPlan, normalizeCollaborationMode, nor
 import type {
   BalanceInfo,
   BotConnectionDiagnostic,
+  BotConnectionSessionMappingView,
   BotInstallPollResult,
   BotInstallStartResult,
   BotRuntimeStatusView,
@@ -94,6 +95,11 @@ interface NativeConfirmRequest {
   destructive: boolean;
 }
 
+interface BotSessionUpdatedEvent {
+  tabId: string;
+  sessionPath: string;
+}
+
 interface DesktopWindowState {
   width: number;
   height: number;
@@ -159,6 +165,7 @@ export interface AppBindings {
   ResumeSession(path: string): Promise<HistoryMessage[]>;
   ResumeSessionForTab(tabID: string, path: string): Promise<HistoryMessage[]>;
   OpenChannelSessionForTab(tabID: string, path: string): Promise<HistoryMessage[]>;
+  ReloadChannelSessionForTab(tabID: string): Promise<HistoryMessage[]>;
   PreviewSession(path: string): Promise<HistoryMessage[]>;
   DeleteSession(path: string): Promise<void>;
   RestoreSession(path: string): Promise<void>;
@@ -269,6 +276,7 @@ export interface AppBindings {
   BotRuntimeStatus(): Promise<BotRuntimeStatusView>;
   DiagnoseBotConnection(id: string): Promise<BotConnectionDiagnostic>;
   TestBotConnection(id: string, target?: string): Promise<BotConnectionDiagnostic>;
+  BindBotSession(connectionID: string, sessionPath: string, scope: string, workspaceRoot: string): Promise<void>;
   SetCloseBehavior(mode: string): Promise<void>;
   SetDisplayMode(mode: string): Promise<void>;
   SetStatusBarStyle(style: string): Promise<void>;
@@ -515,6 +523,13 @@ export function onReady(cb: () => void): () => void {
 export function onProjectTreeChanged(cb: () => void): () => void {
   if (realApp() && typeof window !== "undefined" && window.runtime) {
     return window.runtime.EventsOn("project-tree:changed", () => cb());
+  }
+  return () => {};
+}
+
+export function onBotSessionUpdated(cb: (event: BotSessionUpdatedEvent) => void): () => void {
+  if (realApp() && typeof window !== "undefined" && window.runtime) {
+    return window.runtime.EventsOn("bot:session-updated", (payload) => cb(payload as BotSessionUpdatedEvent));
   }
   return () => {};
 }
@@ -820,7 +835,7 @@ function makeMockApp(): AppBindings {
         feishuGroups: [],
         weixinGroups: [],
       },
-      qq: { enabled: false, appId: "", appSecretEnv: "QQ_BOT_APP_SECRET", secretSet: false, sandbox: false },
+      qq: { enabled: false, appId: "", appSecretEnv: "QQ_BOT_APP_SECRET", secretSet: false, sandbox: false, sessionMappings: [] },
       feishu: {
         enabled: false,
         domain: "feishu",
@@ -1754,6 +1769,10 @@ function makeMockApp(): AppBindings {
       mockTabs = mockTabs.map((tab) => tab.id === tabID ? { ...tab, sessionPath: path, readOnly: true } : tab);
       return this.ResumeSession(path);
     },
+    async ReloadChannelSessionForTab(tabID: string) {
+      const tab = mockTabs.find((item) => item.id === tabID);
+      return this.ResumeSession(tab?.sessionPath || "mock-channel-session.jsonl");
+    },
     async PreviewSession(path: string) {
       const s = sessions.find((x) => x.path === path) ?? trashedSessions.find((x) => x.path === path);
       return [
@@ -2566,6 +2585,27 @@ function makeMockApp(): AppBindings {
           const diag = await this.DiagnoseBotConnection(id);
           if (target?.trim()) return { ...diag, message: `Mock test sent to ${target.trim()}`, messageId: "mock-message-id" };
           return diag;
+        },
+        async BindBotSession(connectionID: string, sessionPath: string, scope: string, workspaceRoot: string) {
+          const conn = settings.bot.connections.find((c) => {
+            const rid = c.id || c.provider + (c.domain ? "-" + c.domain : "");
+            return rid === connectionID;
+          });
+          if (!conn) throw new Error("connection not found: " + connectionID);
+          const mapped: BotConnectionSessionMappingView = {
+            remoteId: conn.sessionMappings[0]?.remoteId || "",
+            sessionId: "path:" + sessionPath,
+            sessionSource: "manual",
+            scope: scope || (conn.workspaceRoot?.trim() ? "project" : "global"),
+            workspaceRoot: workspaceRoot || conn.workspaceRoot || "",
+            userId: "",
+            chatType: "",
+            threadId: "",
+            updatedAt: new Date().toISOString(),
+          };
+          conn.sessionMappings = conn.sessionMappings
+            .filter((m) => m.sessionId !== mapped.sessionId && m.remoteId !== mapped.remoteId)
+            .concat(mapped);
         },
         async SetCloseBehavior(mode: string) {
           settings.closeBehavior = mode === "quit" ? "quit" : "background";

@@ -15,6 +15,7 @@ import (
 	"reasonix/internal/bot"
 	"reasonix/internal/bot/feishu"
 	"reasonix/internal/bot/weixin"
+	"reasonix/internal/botruntime"
 	"reasonix/internal/config"
 )
 
@@ -616,10 +617,118 @@ func firstSessionRemoteID(mappings []config.BotConnectionSessionMapping) string 
 	return ""
 }
 
+// BindBotSession 将指定连接绑定到当前活动的本地会话。
+// connectionID 是连接的运行时 ID，sessionPath 是本地会话的 .jsonl 路径。
+func (a *App) BindBotSession(connectionID, sessionPath, scope, workspaceRoot string) error {
+	connectionID = strings.TrimSpace(connectionID)
+	sessionPath = strings.TrimSpace(sessionPath)
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = "global"
+	}
+	scope = botMappingScope(scope, workspaceRoot)
+	workspaceRoot = botMappingWorkspaceRoot(scope, workspaceRoot)
+	if connectionID == "" || sessionPath == "" {
+		return fmt.Errorf("connectionID and sessionPath are required")
+	}
+	searchID := connectionID
+	if searchID == "__qq_bot__" {
+		searchID = "qq"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	err := a.applyConfigOnly(func(c *config.Config) error {
+		for i := range c.Bot.Connections {
+			conn := &c.Bot.Connections[i]
+			if !conn.Enabled {
+				continue
+			}
+			rid := botruntime.ConnectionRuntimeID(*conn)
+			if rid != searchID && strings.TrimSpace(conn.ID) != searchID {
+				continue
+			}
+			remoteID := firstSessionRemoteID(conn.SessionMappings)
+			sessionID := "path:" + sessionPath
+			for j := range conn.SessionMappings {
+				m := &conn.SessionMappings[j]
+				if strings.TrimSpace(m.RemoteID) == remoteID || strings.TrimSpace(m.SessionID) == sessionID {
+					m.SessionID = sessionID
+					m.SessionSource = "manual"
+					m.Scope = scope
+					m.WorkspaceRoot = workspaceRoot
+					m.UpdatedAt = now
+					conn.UpdatedAt = now
+					return nil
+				}
+			}
+			conn.SessionMappings = append(conn.SessionMappings, config.BotConnectionSessionMapping{
+				RemoteID:      remoteID,
+				SessionID:     sessionID,
+				SessionSource: "manual",
+				Scope:         scope,
+				WorkspaceRoot: workspaceRoot,
+				UpdatedAt:     now,
+			})
+			conn.UpdatedAt = now
+			return nil
+		}
+		// 旧版 Bot.QQ——清掉所有旧的手动绑定，只保留最新一条
+		if searchID == "qq" && c.Bot.QQ.Enabled {
+			sid := "path:" + sessionPath
+			// 从旧映射中提取 RemoteID 等信息（来自自动映射的消息接收）
+			var remoteID, chatType, userID, threadID string
+			for _, m := range c.Bot.QQ.SessionMappings {
+				if strings.TrimSpace(m.RemoteID) != "" {
+					remoteID = m.RemoteID
+					chatType = m.ChatType
+					userID = m.UserID
+					threadID = m.ThreadID
+					break
+				}
+			}
+			// 清掉所有手动绑定，保留一条新的
+			kept := make([]config.BotConnectionSessionMapping, 0, len(c.Bot.QQ.SessionMappings))
+			for _, m := range c.Bot.QQ.SessionMappings {
+				if m.SessionSource != "manual" {
+					kept = append(kept, m)
+				}
+			}
+			c.Bot.QQ.SessionMappings = append(kept, config.BotConnectionSessionMapping{
+				RemoteID:      remoteID,
+				SessionID:     sid,
+				SessionSource: "manual",
+				ChatType:      chatType,
+				UserID:        userID,
+				ThreadID:      threadID,
+				Scope:         scope,
+				WorkspaceRoot: workspaceRoot,
+				UpdatedAt:     now,
+			})
+			return nil
+		}
+		return fmt.Errorf("connection %q not found (checked %d conns, searchID=%q, qqEnabled=%v)", connectionID, len(c.Bot.Connections), searchID, c.Bot.QQ.Enabled)
+	})
+	if err != nil {
+		return err
+	}
+	// 通知运行中的 Gateway 更新绑定路径，立即生效
+	if a.botRuntime != nil {
+		a.botRuntime.updateBoundSession(searchID, sessionPath)
+	}
+	return nil
+}
+
 func (a *App) deleteBotInstall(installID string) {
 	a.mu.Lock()
 	delete(a.botInstalls, installID)
 	a.mu.Unlock()
+}
+
+// botBindScope 根据 session 文件路径检测其所属范围。
+func botBindScope(sessionPath string) (scope string, workspaceRoot string) {
+	if strings.Contains(sessionPath, string(os.PathSeparator)+"projects"+string(os.PathSeparator)) {
+		return "project", ""
+	}
+	return "global", ""
 }
 
 func normalizeBotInstallTarget(provider, domain string) (string, string) {

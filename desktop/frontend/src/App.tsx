@@ -21,7 +21,9 @@ import {
   FileJson,
   GitBranch,
   History,
+  Link,
   MessageSquare,
+  Plus,
   Settings as SettingsIcon,
   Pencil,
   Trash2,
@@ -207,15 +209,26 @@ type SidebarImConnectionDetailProps = {
   onOpenSession: () => void;
   onOpenSettings: () => void;
   onManageAllowlist: () => void;
+  onBindSession: () => void;
 };
 
 function isSidebarImConnection(connection: BotConnectionView): boolean {
-  return connection.provider === "feishu" || connection.provider === "weixin";
+  return connection.provider === "feishu" || connection.provider === "weixin" || connection.provider === "qq";
 }
 
 function sidebarImPlatform(connection: BotConnectionView): SidebarImPlatform {
   if (connection.provider === "weixin") return "weixin";
+  if (connection.provider === "qq") return "qq";
   return connection.domain === "lark" ? "lark" : "feishu";
+}
+
+// 从 session 文件路径反推 workspaceRoot（项目 slug → 真实路径）
+function inferWorkspaceRoot(sessionPath: string): string {
+  const sep = sessionPath.includes("\\") ? "\\" : "/";
+  const match = sessionPath.match(new RegExp(sep + "projects" + sep + "([^" + sep + "]+)" + sep + "sessions"));
+  if (!match) return "";
+  const slug = match[1];
+  return slug.replace(/--/g, ":\\").replace(/--/g, ":\\").replace(/-/g, "\\");
 }
 
 function sidebarImPlatformLabel(platform: SidebarImPlatform, translate: Translator): string {
@@ -318,12 +331,16 @@ async function loadBotRuntimeStatus(): Promise<BotRuntimeStatusView | null> {
 
 function sidebarImQQConnection(bot: BotSettingsView, translate: Translator, runtimeStatus?: BotRuntimeStatusView | null): SidebarImConnection | null {
   if (!sidebarImQQAdded(bot.qq)) return null;
-  const remoteId = bot.qq.appId.trim();
+  const appId = bot.qq.appId.trim();
+  const mappings = bot.qq.sessionMappings;
+  const mapping = mappings?.[mappings.length - 1];
+  // remoteId 用实际发送者 ID（有映射时），否则用 App ID
+  const remoteId = mapping?.remoteId?.trim() || "";
   const status = sidebarImQQStatus(bot, runtimeStatus);
   const statusLabel = sidebarImStatusLabel(status, translate);
   const allowlistUsers = sidebarImAllowlistUsers(bot, "qq");
   const subtitleParts = [
-    remoteId ? compactRemoteId(remoteId) : "QQ",
+    remoteId ? compactRemoteId(remoteId) : appId ? compactRemoteId(appId) : "QQ",
     statusLabel,
   ].filter(Boolean);
   return {
@@ -336,10 +353,10 @@ function sidebarImQQConnection(bot: BotSettingsView, translate: Translator, runt
     status,
     statusLabel,
     remoteId,
-    sessionId: "",
-    sessionSource: "",
-    scope: "global",
-    workspaceRoot: "",
+    sessionId: mapping?.sessionId || "",
+    sessionSource: (mapping?.sessionSource || "") as SidebarImConnection["sessionSource"],
+    scope: (mapping?.scope || "global") as SidebarImConnection["scope"],
+    workspaceRoot: mapping?.workspaceRoot || "",
     allowAll: bot.allowlist.allowAll,
     allowlistEnabled: bot.allowlist.enabled,
     allowlistUsers,
@@ -489,7 +506,7 @@ function sidebarImAccessStatusClass(connection: SidebarImConnection): string {
   return "warn";
 }
 
-function SidebarImConnectionDetail({ connection, onClose, onOpenSession, onOpenSettings, onManageAllowlist }: SidebarImConnectionDetailProps) {
+function SidebarImConnectionDetail({ connection, onClose, onOpenSession, onOpenSettings, onManageAllowlist, onBindSession }: SidebarImConnectionDetailProps) {
   const translate = useT();
   const target = sidebarImSessionTarget(connection);
   const accessStatusClass = sidebarImAccessStatusClass(connection);
@@ -512,6 +529,10 @@ function SidebarImConnectionDetail({ connection, onClose, onOpenSession, onOpenS
           <button type="button" className="btn btn--primary btn--small bot-detail__primary" disabled={!target} title={target ? undefined : translate("botDetail.openDisabled")} onClick={onOpenSession}>
             <MessageSquare size={14} />
             {translate("botDetail.openSession")}
+          </button>
+          <button type="button" className="btn btn--secondary btn--small" onClick={onBindSession}>
+            <Link size={14} />
+            绑定到当前聊天
           </button>
           <button type="button" className="btn btn--secondary btn--small" onClick={onOpenSettings}>
             <SettingsIcon size={14} />
@@ -903,6 +924,8 @@ export default function App() {
   const [sidebarImConnections, setSidebarImConnections] = useState<SidebarImConnection[]>([]);
   const [imTopicSources, setImTopicSources] = useState<Record<string, SidebarImTopicSource>>({});
   const [sidebarImDetailConnectionId, setSidebarImDetailConnectionId] = useState("");
+  const [activeSidebarImConnectionId, setActiveSidebarImConnectionId] = useState("");
+  const [sidebarImExpanded, setSidebarImExpanded] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed);
   const [heartbeatOpen, setHeartbeatOpen] = useState(false);
   type TimeFilter = "all" | "10" | "20" | "1h" | "3h" | "5h" | "1d";
@@ -986,8 +1009,23 @@ export default function App() {
     setImTopicSources(sidebarImTopicSourcesFromBot(settings.bot, t));
   }, [t]);
 
+  const sidebarImRefreshRef = useRef({ last: 0, inFlight: false });
+
+  const quietlyRefreshSidebarImConnections = useCallback(() => {
+    const now = Date.now();
+    if (sidebarImRefreshRef.current.inFlight || now - sidebarImRefreshRef.current.last < 1000) return;
+    sidebarImRefreshRef.current.inFlight = true;
+    sidebarImRefreshRef.current.last = now;
+    void reloadSidebarImConnections()
+      .catch((e) => console.warn("bot sidebar refresh failed", e))
+      .finally(() => {
+        sidebarImRefreshRef.current.inFlight = false;
+      });
+  }, [reloadSidebarImConnections]);
+
   const openBotSettings = useCallback(() => {
     closeTransientOverlays();
+    setSidebarImExpanded(false);
     setSidebarImDetailConnectionId("");
     setSettingsFocus(null);
     setSettingsTarget("bots");
@@ -999,6 +1037,23 @@ export default function App() {
     setSettingsFocus({ target: "bot-allowlist", connectionId });
     setSettingsTarget("bots");
   }, [closeTransientOverlays]);
+
+  const selectSidebarImConnection = useCallback(async (connection: SidebarImConnection) => {
+    await reloadSidebarImConnections();
+    closeTransientOverlays();
+    setSidebarImExpanded(false);
+    setSidebarImDetailConnectionId(connection.id);
+    setActiveSidebarImConnectionId(connection.id);
+  }, [closeTransientOverlays, reloadSidebarImConnections]);
+
+  const toggleSidebarImPanel = useCallback(() => {
+    if (sidebarImConnections.length === 0) {
+      openBotSettings();
+      return;
+    }
+    if (!sidebarImExpanded) quietlyRefreshSidebarImConnections();
+    setSidebarImExpanded((value) => !value);
+  }, [openBotSettings, quietlyRefreshSidebarImConnections, sidebarImConnections.length, sidebarImExpanded]);
 
   const pulseSidebarToggle = useCallback(() => {
     if (typeof window === "undefined") return;
@@ -1110,6 +1165,21 @@ export default function App() {
       cancelled = true;
     };
   }, [applyDesktopPreferences, t]);
+
+  useEffect(() => {
+    if (sidebarImConnections.length === 0) {
+      setSidebarImExpanded(false);
+    }
+    setActiveSidebarImConnectionId((current) => {
+      if (sidebarImConnections.length === 0) return "";
+      if (current && sidebarImConnections.some((connection) => connection.id === current)) return current;
+      return sidebarImConnections[0].id;
+    });
+    setSidebarImDetailConnectionId((current) => {
+      if (!current) return "";
+      return sidebarImConnections.some((connection) => connection.id === current) ? current : "";
+    });
+  }, [sidebarImConnections]);
 
   useEffect(() => {
     setSidebarImDetailConnectionId((current) => {
@@ -2124,7 +2194,12 @@ export default function App() {
         const tab = await ensureBlankTab(connection.scope, connection.scope === "project" ? connection.workspaceRoot : "");
         await openChannelSession(target.value, tab.id);
       } else if (target.kind === "path") {
-        const tab = await ensureBlankTab(connection.scope, connection.scope === "project" ? connection.workspaceRoot : "");
+        // 手动绑定：根据路径判断 scope，创建正确范围的标签页后恢复
+        const pathLower = target.value.toLowerCase();
+        const isProject = pathLower.includes("\\projects\\") || pathLower.includes("/projects/");
+        const wr = connection.workspaceRoot || (isProject ? inferWorkspaceRoot(target.value) : "");
+        const scope = wr ? "project" : "global";
+        const tab = await ensureBlankTab(scope, wr);
         await resumeSession(target.value, tab.id);
       } else if (connection.scope === "project") {
         await openProjectTab(connection.workspaceRoot, target.value);
@@ -2138,6 +2213,27 @@ export default function App() {
       showToast(t("sidebar.imOpenFailed", { name: connection.title }));
     }
   }, [ensureBlankTab, openChannelSession, openGlobalTab, openProjectTab, refreshTabMetas, resumeSession, showToast, t]);
+
+  const bindSessionToConnection = useCallback(async (connection: SidebarImConnection) => {
+    if (typeof window === "undefined" || !window.runtime) return;
+    const tab = activeTab;
+    if (!tab?.sessionPath) {
+      showToast("请先打开一个有会话的聊天标签页");
+      return;
+    }
+    try {
+      // connectionId 为空时用 platform 兜底，匹配 Go 端 ConnectionRuntimeID
+      const cid = connection.connectionId || connection.platform;
+      const wr = tab.workspaceRoot || inferWorkspaceRoot(tab.sessionPath || "");
+      showToast("绑定中... cid=" + cid + " wr=" + (wr || "(空)"));
+      await app.BindBotSession(cid, tab.sessionPath, wr ? "project" : "global", wr);
+      await reloadSidebarImConnections();
+      showToast("已绑定到当前聊天");
+    } catch (err) {
+      console.warn("bind session failed", err);
+      showToast("绑定失败: " + String(err));
+    }
+  }, [activeTab, reloadSidebarImConnections, showToast, t]);
 
   // History drawer: project menus can open a scoped saved-session list. Idle row
   // clicks resume; running row clicks only preview through PreviewSession.
@@ -2435,6 +2531,15 @@ export default function App() {
     sidebarCollapsed ? "sidebar--collapsed" : "",
     sidebarWorkbench ? "sidebar--workbench" : "",
   ].filter(Boolean).join(" ");
+  const sidebarImConnectedCount = sidebarImConnections.filter((connection) => connection.status === "connected").length;
+  const sidebarImSummaryText = sidebarImConnections.length === 0
+    ? t("sidebar.imEmpty")
+    : sidebarImConnectedCount > 0
+      ? t("sidebar.imOnlineCount", { n: sidebarImConnectedCount })
+      : t("sidebar.imConnectionCount", { n: sidebarImConnections.length });
+  const sidebarImToggleLabel = sidebarImConnections.length === 0
+    ? t("sidebar.imEmpty")
+    : t(sidebarImExpanded ? "common.collapse" : "common.expand");
 
   return (
     <ShellExpandProvider>
@@ -2662,6 +2767,76 @@ export default function App() {
             </nav>
           ) : (
             <nav className="sidebar__nav">
+              <div className={`sidebar-im${sidebarImExpanded ? " sidebar-im--expanded" : ""}`} aria-label={t("sidebar.im")}>
+                <button
+                  className="sidebar-im__summary"
+                  type="button"
+                  aria-expanded={sidebarImExpanded}
+                  aria-label={sidebarImToggleLabel}
+                  title={sidebarImToggleLabel}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return;
+                    event.preventDefault();
+                    toggleSidebarImPanel();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    toggleSidebarImPanel();
+                  }}
+                >
+                  <MessageSquare size={15} />
+                  <span className="sidebar-im__summary-label">{t("sidebar.im")}</span>
+                  <span className="sidebar-im__summary-status">{sidebarImSummaryText}</span>
+                </button>
+                {sidebarImExpanded && sidebarImConnections.length > 0 && (
+                  <div className="sidebar-im__panel" role="dialog" aria-label={t("sidebar.imManage")}>
+                    <div className="sidebar-im__panel-head">
+                      <span>{t("sidebar.imManage")}</span>
+                      <div className="sidebar-im__panel-actions">
+                        <Tooltip label={t("sidebar.imAdd")} fill side="right" disabled={sidebarNavTooltipDisabled}>
+                          <button
+                            className="sidebar-im__icon-button"
+                            type="button"
+                            onClick={openBotSettings}
+                            aria-label={t("sidebar.imAdd")}
+                          >
+                            <Plus size={13} />
+                          </button>
+                        </Tooltip>
+                      </div>
+                    </div>
+                    <div className="sidebar-im__list">
+                      {sidebarImConnections.map((connection) => (
+                        <div
+                          key={connection.id}
+                          className={[
+                            "sidebar-im-row-shell",
+                            activeSidebarImConnectionId === connection.id ? "sidebar-im-row-shell--active" : "",
+                            `sidebar-im-row-shell--${connection.status}`,
+                          ].filter(Boolean).join(" ")}
+                        >
+                          <button
+                            className="sidebar-im-row"
+                            type="button"
+                            title={`${connection.platformLabel} · ${connection.statusLabel}`}
+                            onClick={() => void selectSidebarImConnection(connection)}
+                          >
+                            <span className={`sidebar-im-row__platform sidebar-im-row__platform--${connection.platform}`} aria-hidden="true">
+                              {connection.platform === "qq" ? "Q" : connection.platform === "weixin" ? "微" : connection.platform === "lark" ? "L" : "飞"}
+                            </span>
+                            <span className="sidebar-im-row__main">
+                              <strong>{connection.title}</strong>
+                              <span>{connection.subtitle}</span>
+                            </span>
+                            <span className={`sidebar-im-row__status sidebar-im-row__status--${connection.status}`} title={connection.statusLabel} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
               {sidebarCreation && (
                 <Tooltip label={t("projectTree.searchPlaceholder")} fill side="right" disabled={sidebarNavTooltipDisabled}>
                   <button
@@ -2973,6 +3148,7 @@ export default function App() {
                 onOpenSettings={openBotSettings}
                 onManageAllowlist={() => openBotAllowlistSettings(sidebarImDetailConnection.connectionId)}
                 onOpenSession={() => void openSidebarImConnectionSession(sidebarImDetailConnection)}
+                onBindSession={() => void bindSessionToConnection(sidebarImDetailConnection)}
               />
             ) : state.meta?.ready === false && !state.meta?.startupErr ? (
               <div className="loading-screen">

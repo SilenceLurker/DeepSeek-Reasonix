@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -575,6 +576,46 @@ func TestRememberBotConnectionRemoteStoresStableScope(t *testing.T) {
 	}
 	if projectMapping.Scope != "project" || projectMapping.WorkspaceRoot != "/tmp/reasonix-project" || projectMapping.RemoteID != "wxid_project" {
 		t.Fatalf("project mapping = %+v, want project scope and workspace", projectMapping)
+	}
+}
+
+func TestBindBotSessionUpdatesLegacyQQMapping(t *testing.T) {
+	isolateDesktopUserDirs(t)
+	cfg := config.LoadForEdit(config.UserConfigPath())
+	cfg.Bot.Enabled = true
+	cfg.Bot.QQ.Enabled = true
+	cfg.Bot.QQ.SessionMappings = []config.BotConnectionSessionMapping{{
+		RemoteID:      "qq-remote",
+		SessionID:     "path:/old/auto.jsonl",
+		SessionSource: "auto",
+		ChatType:      "group",
+		UserID:        "qq-user",
+		ThreadID:      "thread-1",
+		Scope:         "global",
+	}}
+	if err := cfg.SaveTo(config.UserConfigPath()); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	app := NewApp()
+	sessionPath := filepath.Join(t.TempDir(), "bound.jsonl")
+	if err := app.BindBotSession("__qq_bot__", sessionPath, "project", "/tmp/reasonix-project"); err != nil {
+		t.Fatalf("BindBotSession legacy QQ: %v", err)
+	}
+
+	got := config.LoadForEdit(config.UserConfigPath()).Bot.QQ.SessionMappings
+	if len(got) != 2 {
+		t.Fatalf("qq mappings = %+v, want auto mapping plus manual mapping", got)
+	}
+	manual := got[1]
+	if manual.SessionID != "path:"+sessionPath || manual.SessionSource != "manual" {
+		t.Fatalf("manual mapping = %+v, want manual path binding", manual)
+	}
+	if manual.RemoteID != "qq-remote" || manual.ChatType != "group" || manual.UserID != "qq-user" || manual.ThreadID != "thread-1" {
+		t.Fatalf("manual identity = %+v, want preserved QQ remote identity", manual)
+	}
+	if manual.Scope != "project" || manual.WorkspaceRoot != "/tmp/reasonix-project" {
+		t.Fatalf("manual scope = %+v, want project workspace binding", manual)
 	}
 }
 
