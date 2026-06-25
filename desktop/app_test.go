@@ -2744,6 +2744,20 @@ func TestOpenChannelSessionForTabIsReadOnly(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatalf("close append: %v", err)
 	}
+	reloaded, err := app.ReloadChannelSessionForTab("test")
+	if err != nil {
+		t.Fatalf("ReloadChannelSessionForTab: %v", err)
+	}
+	foundReloaded := false
+	for _, msg := range reloaded {
+		if msg.Role == "user" && msg.Content == "external follow-up" {
+			foundReloaded = true
+			break
+		}
+	}
+	if !foundReloaded {
+		t.Fatalf("reloaded channel history did not include external follow-up: %+v", reloaded)
+	}
 	app.snapshotAllTabs()
 	afterSnapshot, err := os.ReadFile(path)
 	if err != nil {
@@ -2751,6 +2765,35 @@ func TestOpenChannelSessionForTabIsReadOnly(t *testing.T) {
 	}
 	if !strings.Contains(string(afterSnapshot), "external follow-up") {
 		t.Fatalf("read-only channel snapshot overwrote external append:\n%s", afterSnapshot)
+	}
+}
+
+func TestReloadChannelSessionForTabRefreshesWritableTab(t *testing.T) {
+	isolateDesktopUserDirs(t)
+
+	dir := config.SessionDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	path := filepath.Join(dir, "bound-current.jsonl")
+	if err := os.WriteFile(path, []byte(`{"role":"user","content":"external update"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	app := NewApp()
+	ctrl := control.New(control.Options{SessionDir: dir, SessionPath: path, Label: "test"})
+	app.setTestCtrl(ctrl, "")
+	defer app.activeCtrl().Close()
+
+	got, err := app.ReloadChannelSessionForTab("test")
+	if err != nil {
+		t.Fatalf("ReloadChannelSessionForTab: %v", err)
+	}
+	if len(got) != 1 || got[0].Role != "user" || got[0].Content != "external update" {
+		t.Fatalf("reloaded writable tab history = %+v", got)
+	}
+	if meta := app.tabMeta(app.activeTab(), true); meta.ReadOnly {
+		t.Fatalf("writable tab became read-only: %+v", meta)
 	}
 }
 

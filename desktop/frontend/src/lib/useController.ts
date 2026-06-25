@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { asArray } from "./array";
 import { addBreadcrumb } from "./breadcrumbs";
-import { app, onEvent, onReady } from "./bridge";
+import { app, onBotSessionUpdated, onEvent, onReady } from "./bridge";
 import { invalidateCache } from "./composerHistory";
 import { createRafBatch } from "./rafBatch";
 import { t } from "./i18n";
@@ -829,6 +829,21 @@ export function useController() {
     if (messages.length) dispatchTo(tabId, { type: "history", messages });
   }, [bumpSessionLoadSeq, dispatchTo, sessionLoadCurrent]);
 
+  const reloadChannelSessionForTab = useCallback(async (tabId: string) => {
+    const seq = bumpSessionLoadSeq(tabId);
+    const messages = asArray(await app.ReloadChannelSessionForTab(tabId).catch(() => [] as HistoryMessage[]));
+    if (!sessionLoadCurrent(tabId, seq)) return;
+    dispatchTo(tabId, { type: "reset" });
+    if (messages.length) dispatchTo(tabId, { type: "history", messages });
+    void refreshMetaForTab(tabId, dispatchTo);
+    app.ContextUsageForTab(tabId).then((context) => dispatchTo(tabId, { type: "context", context })).catch(() => {});
+    app.BalanceForTab(tabId).then((balance) => dispatchTo(tabId, { type: "balance", balance })).catch(() => {});
+    app.EffortForTab(tabId).then((effort) => dispatchTo(tabId, { type: "effort", effort })).catch(() => {});
+    app.JobsForTab(tabId).then((jobs) => dispatchTo(tabId, { type: "jobs", jobs: asArray(jobs) })).catch(() => {});
+    void refreshCheckpoints(tabId);
+    invalidateCache();
+  }, [bumpSessionLoadSeq, dispatchTo, refreshCheckpoints, sessionLoadCurrent]);
+
   const activeTabFromBackend = useCallback(async (): Promise<TabMeta | undefined> => {
     const tabs = asArray(await app.ListTabs().catch(() => [] as TabMeta[]));
     return tabs.find((tab) => tab.active) ?? tabs[0];
@@ -939,6 +954,13 @@ export function useController() {
 
     return () => { textBatch.drain(); off(); offReady(); };
   }, [dispatchTo, loadSessionDataForTab, refreshCheckpoints, syncActiveTabFromBackend]);
+
+  useEffect(() => {
+    return onBotSessionUpdated((event) => {
+      if (!event.tabId) return;
+      void reloadChannelSessionForTab(event.tabId);
+    });
+  }, [reloadChannelSessionForTab]);
 
   // Stale-turn watchdog: if the frontend thinks the agent is running but the
   // turn stream has gone quiet, reconcile with the backend. This catches cases

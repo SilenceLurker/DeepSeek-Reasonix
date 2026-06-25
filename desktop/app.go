@@ -2122,6 +2122,42 @@ func (a *App) OpenChannelSessionForTab(tabID, path string) ([]HistoryMessage, er
 	return a.HistoryForTab(tab.ID), nil
 }
 
+func (a *App) ReloadChannelSessionForTab(tabID string) ([]HistoryMessage, error) {
+	tab := a.tabByID(tabID)
+	if tab == nil {
+		return []HistoryMessage{}, fmt.Errorf("tab is not ready")
+	}
+	sessionPath := canonicalTabSessionPath(tab.currentSessionPath())
+	if sessionPath == "" {
+		return []HistoryMessage{}, fmt.Errorf("session path is required")
+	}
+	if tab.hasActiveRuntimeWork() {
+		return a.HistoryForTab(tab.ID), nil
+	}
+	loaded, err := loadResumableSession(sessionPath)
+	if err != nil {
+		return nil, err
+	}
+	readOnly := tab.ReadOnly
+	if tab.Ctrl == nil {
+		if err := a.rebindTabToLoadedSessionPath(tab, sessionPath, loaded); err != nil {
+			return nil, err
+		}
+		if readOnly {
+			a.setTabReadOnly(tab.ID, true)
+		}
+		return a.HistoryForTab(tab.ID), nil
+	}
+	tab.Ctrl.Resume(loaded, sessionPath)
+	a.mu.Lock()
+	if current := a.tabs[tab.ID]; current == tab {
+		tab.SessionPath = sessionPath
+		a.saveTabsLocked()
+	}
+	a.mu.Unlock()
+	return historyMessages(loaded.Snapshot(), sessionDisplayResolver(controllerSessionDir(tab.Ctrl), sessionPath)), nil
+}
+
 func (a *App) setTabReadOnly(tabID string, readOnly bool) {
 	a.mu.Lock()
 	if tab := a.tabs[tabID]; tab != nil && tab.ReadOnly != readOnly {
