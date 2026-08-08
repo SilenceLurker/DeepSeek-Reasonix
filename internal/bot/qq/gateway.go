@@ -598,7 +598,9 @@ func (a *adapter) sendMessageChunk(ctx context.Context, msg bot.OutboundMessage,
 			rows = append(rows, map[string]any{"buttons": buttons})
 		}
 		payload["keyboard"] = map[string]interface{}{
-			"content": rows,
+			"content": map[string]interface{}{
+				"rows": rows,
+			},
 		}
 		return a.sendMessagePayload(ctx, msg, payload, seq)
 	}

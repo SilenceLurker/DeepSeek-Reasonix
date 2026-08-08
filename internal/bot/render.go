@@ -126,7 +126,17 @@ func (s *renderSink) Emit(e event.Event) {
 		case PlatformFeishu:
 			msg.Card = approvalCard(e.Approval, s.chatType, s.userID)
 		}
-		_ = s.send(msg)
+		if err := s.send(msg); err != nil && msg.Keyboard != nil {
+			// Button/keyboard delivery failed (e.g. the QQ application lacks the
+			// message-button capability, or the keyboard payload was rejected).
+			// Fall back to plain text so the approval prompt — including the
+			// command under review and the reply-1/2 or /approve,/deny path —
+			// still reaches the user instead of being silently dropped.
+			fallback := msg
+			fallback.Keyboard = nil
+			s.logger.Warn("approval keyboard send failed, retrying as plain text", "err", err)
+			_ = s.send(fallback)
+		}
 
 	case event.AskRequest:
 		if s.onAsk != nil {
